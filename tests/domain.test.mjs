@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  bidForTeam,
   canTeamBid,
   createDefaultState,
   deriveStats,
@@ -9,28 +8,28 @@ import {
   markCurrentUnsold,
   retainCurrentPlayer,
   sellCurrentPlayer,
+  setFinalBidForTeam,
 } from "../src/domain.mjs";
 import { parseCSV, toCSV } from "../src/csv.mjs";
 
-test("bidding starts at opening bid and advances by increment", () => {
+test("final bid entry sets winning team and amount", () => {
   const state = createDefaultState();
   const team = state.teams[0];
 
-  bidForTeam(state, team.id);
-  assert.equal(state.auction.currentBid, state.settings.minBid);
+  setFinalBidForTeam(state, team.id, 1500);
 
-  bidForTeam(state, state.teams[1].id);
-  assert.equal(state.auction.currentBid, state.settings.minBid + state.settings.bidIncrement);
+  assert.equal(state.auction.currentBid, 1500);
+  assert.equal(state.auction.highestBidderId, team.id);
 });
 
-test("highest bidder cannot bid again immediately", () => {
+test("final bid must meet opening bid", () => {
   const state = createDefaultState();
   const team = state.teams[0];
-  bidForTeam(state, team.id);
 
-  const check = canTeamBid(state, team.id);
+  const check = canTeamBid(state, team.id, state.settings.minBid - 1);
+
   assert.equal(check.ok, false);
-  assert.match(check.errors[0], /Already highest bidder/);
+  assert.match(check.errors[0], /Bid must be at least/);
 });
 
 test("sale assigns player and moves to next available player", () => {
@@ -38,12 +37,12 @@ test("sale assigns player and moves to next available player", () => {
   const firstPlayer = getCurrentPlayer(state);
   const team = state.teams[0];
 
-  bidForTeam(state, team.id);
+  setFinalBidForTeam(state, team.id, 1500);
   sellCurrentPlayer(state);
 
   assert.equal(firstPlayer.status, "sold");
   assert.equal(firstPlayer.teamId, team.id);
-  assert.equal(firstPlayer.soldPrice, state.settings.minBid);
+  assert.equal(firstPlayer.soldPrice, 1500);
   assert.notEqual(state.auction.currentPlayerId, firstPlayer.id);
 });
 
@@ -59,7 +58,7 @@ test("unsold player is passed and auction advances", () => {
 
 test("player with an active bid cannot be marked unsold", () => {
   const state = createDefaultState();
-  bidForTeam(state, state.teams[0].id);
+  setFinalBidForTeam(state, state.teams[0].id, 1500);
 
   assert.throws(() => markCurrentUnsold(state), /Use undo before passing/);
 });

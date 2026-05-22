@@ -1,7 +1,6 @@
 import {
   COLORS,
   addEvent,
-  bidForTeam,
   canTeamBid,
   createDefaultState,
   deriveStats,
@@ -9,13 +8,14 @@ import {
   initials,
   makePlayer,
   makeTeam,
-  nextBidFor,
   normalizeState,
+  openingBidFor,
   resetAuctionResults,
   restartUnsoldRound,
   restoreSnapshot,
   retainCurrentPlayer,
   sellCurrentPlayer,
+  setFinalBidForTeam,
   snapshotState,
   uid,
   validateAuction,
@@ -168,18 +168,32 @@ function renderAuction() {
         }
       </div>
       <div class="card bid-board">
-        <div class="bid-display">
-          <div class="bid-label">Current Bid</div>
-          <div class="bid-amount">${state.auction.currentBid ? money(state.auction.currentBid) : "---"}</div>
-          <div class="highest">${state.auction.highestBidderId ? escapeHtml(teamById(state.auction.highestBidderId)?.name) : "Waiting for bid"}</div>
-          <div class="bid-label">Next: ${currentPlayer ? money(nextBidFor(state)) : "-"} ${escapeHtml(state.settings.currencyLabel)}</div>
+        <div class="final-bid-panel">
+          <div>
+            <div class="bid-label">Winning Team</div>
+            <div class="selected-team-name">${state.auction.highestBidderId ? escapeHtml(teamById(state.auction.highestBidderId)?.name) : "Select a team"}</div>
+          </div>
+          <label class="final-bid-field">
+            <span>Final Bid</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              inputmode="numeric"
+              placeholder="Enter amount"
+              value="${state.auction.currentBid || ""}"
+              data-input="final-bid"
+              ${currentPlayer ? "" : "disabled"}
+            />
+          </label>
         </div>
         <div class="team-bid-grid">
           ${state.teams.map((team) => renderTeamBid(team, stats[team.id])).join("")}
         </div>
         <div class="row wrap spread" style="margin-top:16px">
-          <button class="btn ghost" data-action="unsold" ${currentPlayer && state.auction.currentBid === 0 ? "" : "disabled"}>Pass / Unsold</button>
+          <button class="btn ghost" data-action="unsold" ${currentPlayer && !state.auction.highestBidderId && state.auction.currentBid === 0 ? "" : "disabled"}>Pass / Unsold</button>
           <div class="row wrap">
+            <button class="btn ghost" data-action="clear-final-bid" ${state.auction.highestBidderId || state.auction.currentBid ? "" : "disabled"}>Clear</button>
             <button class="btn ghost" data-action="undo" ${state.undoStack.length ? "" : "disabled"}>Undo</button>
             <button class="btn success" data-action="sell" ${state.auction.highestBidderId ? "" : "disabled"}>Confirm Sale</button>
           </div>
@@ -210,21 +224,22 @@ function renderAuction() {
 }
 
 function renderTeamBid(team, stats) {
-  const check = canTeamBid(state, team.id);
+  const openingBid = openingBidFor(getCurrentPlayer(state), state.settings);
+  const check = canTeamBid(state, team.id, openingBid);
   const isHighest = state.auction.highestBidderId === team.id;
   return html`
     <button
       class="team-bid ${isHighest ? "highest" : ""}"
       style="--team-color:${escapeHtml(team.color)}"
-      data-action="bid"
+      data-action="select-team"
       data-team-id="${escapeHtml(team.id)}"
-      title="${escapeHtml(check.errors.join(", ") || "Place next bid")}"
+      title="${escapeHtml(check.errors.join(", ") || "Select team")}"
       ${check.ok ? "" : "disabled"}
     >
       <div class="mini-logo">${imageOrInitial(team.logo, team.name)}</div>
       <div class="team-name">${escapeHtml(team.name)}</div>
       <div class="team-meta">
-        ${isHighest ? "Highest" : `Max ${money(stats.maxAllowedBid)} | ${stats.playerCount}/${state.settings.maxPlayers}`}
+        ${isHighest ? "Selected" : `Max ${money(stats.maxAllowedBid)} | ${stats.playerCount}/${state.settings.maxPlayers}`}
       </div>
     </button>
   `;
@@ -487,16 +502,26 @@ app.addEventListener("click", (event) => {
     saveState(state);
     render();
   }
-  if (action === "bid") {
+  if (action === "select-team") {
     const team = teamById(actionEl.dataset.teamId);
-    commit(`${team.name} bid ${money(nextBidFor(state))}`, (draft) => bidForTeam(draft, team.id), "bid", {
-      teamId: team.id,
-    });
+    state.auction.highestBidderId = team.id;
+    state.ui.message = `${team.name} selected. Enter the final bid amount.`;
+    saveState(state);
+    render();
   }
   if (action === "sell") {
     const player = getCurrentPlayer(state);
     const team = teamById(state.auction.highestBidderId);
-    commit(`Sold ${player.name} to ${team.name} for ${money(state.auction.currentBid)}`, sellCurrentPlayer, "sale");
+    const finalBidInput = document.querySelector('[data-input="final-bid"]');
+    const finalBid = Math.max(0, Number.parseInt(finalBidInput?.value, 10) || 0);
+    commit(
+      `Sold ${player.name} to ${team.name} for ${money(finalBid)}`,
+      (draft) => {
+        setFinalBidForTeam(draft, team.id, finalBid);
+        sellCurrentPlayer(draft);
+      },
+      "sale",
+    );
   }
   if (action === "unsold") {
     const player = getCurrentPlayer(state);
@@ -515,6 +540,13 @@ app.addEventListener("click", (event) => {
     commit("Auction logo cleared", (draft) => {
       draft.settings.logo = "";
     });
+  }
+  if (action === "clear-final-bid") {
+    state.auction.currentBid = 0;
+    state.auction.highestBidderId = null;
+    state.ui.message = "Final bid cleared.";
+    saveState(state);
+    render();
   }
   if (action === "export-teams") exportTeamsCSV(state);
   if (action === "export-players") exportPlayersCSV(state);
@@ -592,6 +624,7 @@ app.addEventListener("input", (event) => {
     saveState(state);
     render();
   }
+
 });
 
 app.addEventListener("change", async (event) => {

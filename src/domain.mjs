@@ -289,20 +289,21 @@ export function nextBidFor(state) {
     : openingBidFor(player, state.settings);
 }
 
-export function canTeamBid(state, teamId) {
+export function canTeamBid(state, teamId, bidAmount = nextBidFor(state)) {
   const stats = deriveStats(state)[teamId];
-  const nextBid = nextBidFor(state);
+  const finalBid = Math.max(0, Number.parseInt(bidAmount, 10) || 0);
   const player = getCurrentPlayer(state);
+  const openingBid = openingBidFor(player, state.settings);
   const errors = [];
 
   if (!player) errors.push("No available player selected");
   if (player && player.status !== "available") errors.push("Player is not available");
-  if (state.auction.highestBidderId === teamId) errors.push("Already highest bidder");
   if (!stats) errors.push("Team not found");
   if (stats && stats.playerCount >= state.settings.maxPlayers) errors.push("Squad full");
-  if (stats && stats.maxAllowedBid < nextBid) errors.push("Budget protection limit reached");
+  if (player && finalBid < openingBid) errors.push(`Bid must be at least ${openingBid}`);
+  if (stats && stats.maxAllowedBid < finalBid) errors.push("Budget protection limit reached");
 
-  return { ok: errors.length === 0, errors, nextBid };
+  return { ok: errors.length === 0, errors, finalBid };
 }
 
 export function nextAvailablePlayerId(state, afterId = state.auction.currentPlayerId) {
@@ -312,11 +313,11 @@ export function nextAvailablePlayerId(state, afterId = state.auction.currentPlay
   return available[currentIndex + 1]?.id ?? available[0].id;
 }
 
-export function bidForTeam(state, teamId) {
-  const result = canTeamBid(state, teamId);
+export function setFinalBidForTeam(state, teamId, bidAmount) {
+  const result = canTeamBid(state, teamId, bidAmount);
   if (!result.ok) throw new Error(result.errors[0]);
 
-  state.auction.currentBid = result.nextBid;
+  state.auction.currentBid = result.finalBid;
   state.auction.highestBidderId = teamId;
   return state;
 }
