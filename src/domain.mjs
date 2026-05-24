@@ -1,4 +1,6 @@
-export const STORAGE_KEY = "auction-control-room-v1";
+import { SEED_PLAYERS, SEED_TEAMS } from "./seed-data.mjs";
+
+export const STORAGE_KEY = "auction-control-room-v2";
 
 export const COLORS = [
   "#1d4ed8",
@@ -13,46 +15,9 @@ export const COLORS = [
   "#64748b",
 ];
 
-const firstNames = [
-  "Aarav",
-  "Vihaan",
-  "Aditya",
-  "Sai",
-  "Arjun",
-  "Siddharth",
-  "Rohan",
-  "Rahul",
-  "Dev",
-  "Krishna",
-  "Kabir",
-  "Aryan",
-  "Abhinav",
-  "Ravi",
-  "Amit",
-  "Karan",
-  "Yash",
-  "Nitin",
-  "Pooja",
-  "Anjali",
-];
-
-const lastNames = [
-  "Sharma",
-  "Singh",
-  "Kumar",
-  "Patel",
-  "Gupta",
-  "Reddy",
-  "Rao",
-  "Joshi",
-  "Desai",
-  "Yadav",
-  "Chauhan",
-  "Thakur",
-  "Jain",
-  "Verma",
-  "Mishra",
-  "Mehta",
+export const DIVISIONS = [
+  { id: "men", label: "Men's", aliases: ["men", "mens", "male", "m", "boys"] },
+  { id: "women", label: "Women's", aliases: ["women", "womens", "female", "f", "girls"] },
 ];
 
 export const DEFAULT_ROLES = ["Batter", "Bowler", "All-Rounder", "Wicket Keeper"];
@@ -74,9 +39,24 @@ export function initials(name) {
   return nameInitials(name) || "A";
 }
 
-export function makeTeam(name, index = 0) {
+export function normalizeDivision(value, fallback = "men") {
+  const normalized = String(value || "").trim().toLowerCase().replaceAll(/['\s_-]/g, "");
+  const match = DIVISIONS.find((division) => division.aliases.includes(normalized));
+  return match?.id || fallback;
+}
+
+export function divisionLabel(division) {
+  return DIVISIONS.find((item) => item.id === division)?.label || "Men's";
+}
+
+export function activeDivision(state) {
+  return normalizeDivision(state?.ui?.division, "men");
+}
+
+export function makeTeam(name, index = 0, division = "men") {
   return {
     id: uid("team"),
+    division: normalizeDivision(division),
     name,
     color: COLORS[index % COLORS.length],
     logo: "",
@@ -84,27 +64,27 @@ export function makeTeam(name, index = 0) {
 }
 
 export function makePlayer(values = {}, index = 0) {
-  const name =
-    values.name ??
-    `${firstNames[index % firstNames.length]} ${lastNames[(index * 3) % lastNames.length]}`;
+  const name = values.name ?? `Player ${index + 1}`;
 
   return {
     id: values.id || uid("player"),
+    division: normalizeDivision(values.division ?? values.gender ?? values.auction, "men"),
+    playerNumber: normalizePlayerNumber(values.playerNumber ?? values.playerId ?? values.photoId, index),
     name,
     role: values.role || DEFAULT_ROLES[index % DEFAULT_ROLES.length],
-    age: Number(values.age) || 22,
-    basePrice: Number(values.basePrice) || 0,
+    age: positiveInt(values.age, 22),
+    basePrice: nonNegativeInt(values.basePrice),
     photo: values.photo || "",
     status: values.status || "available",
     teamId: values.teamId || null,
-    soldPrice: Number(values.soldPrice) || 0,
+    soldPrice: nonNegativeInt(values.soldPrice),
     isRetained: Boolean(values.isRetained),
   };
 }
 
 export function createDefaultState() {
-  const teams = ["Titans", "Eagles", "Lions", "Panthers", "Sharks", "Falcons"].map(makeTeam);
-  const players = Array.from({ length: 40 }, (_, index) => makePlayer({}, index));
+  const teams = SEED_TEAMS.map((team, index) => makeTeam(team.name, index, team.division));
+  const players = SEED_PLAYERS.map((player, index) => makePlayer(player, index));
 
   return normalizeState({
     version: 1,
@@ -125,6 +105,18 @@ export function createDefaultState() {
       currentBid: 0,
       highestBidderId: null,
     },
+    auctions: {
+      men: {
+        currentPlayerId: players.find((player) => player.division === "men")?.id ?? null,
+        currentBid: 0,
+        highestBidderId: null,
+      },
+      women: {
+        currentPlayerId: players.find((player) => player.division === "women")?.id ?? null,
+        currentBid: 0,
+        highestBidderId: null,
+      },
+    },
     events: [],
     undoStack: [],
     ui: {
@@ -132,6 +124,7 @@ export function createDefaultState() {
       message: "",
       search: "",
       statusFilter: "all",
+      division: "men",
     },
   });
 }
@@ -164,6 +157,7 @@ export function normalizeState(input) {
     highestBidderId: null,
     ...(state.auction || {}),
   };
+  state.auction.currentBid = nonNegativeInt(state.auction.currentBid);
   state.events = Array.isArray(state.events) ? state.events : [];
   state.undoStack = Array.isArray(state.undoStack) ? state.undoStack : [];
   state.ui = {
@@ -171,8 +165,10 @@ export function normalizeState(input) {
     message: "",
     search: "",
     statusFilter: "all",
+    division: "men",
     ...(state.ui || {}),
   };
+  state.ui.division = activeDivision(state);
 
   const teamIds = new Set();
   state.teams = state.teams
@@ -183,11 +179,15 @@ export function normalizeState(input) {
       teamIds.add(id);
       return {
         id,
+        division: normalizeDivision(team.division ?? team.gender ?? team.auction, "men"),
         name: String(team.name).trim(),
         color: team.color || COLORS[index % COLORS.length],
         logo: team.logo || "",
       };
     });
+  for (const defaultTeam of createMissingDefaultTeams(state.teams)) {
+    state.teams.push(defaultTeam);
+  }
 
   const playerIds = new Set();
   state.players = state.players
@@ -199,36 +199,91 @@ export function normalizeState(input) {
       const status = ["available", "sold", "unsold"].includes(player.status)
         ? player.status
         : "available";
-      const teamId = state.teams.some((team) => team.id === player.teamId) ? player.teamId : null;
+      const division = normalizeDivision(player.division ?? player.gender ?? player.auction, "men");
+      const team = state.teams.find((item) => item.id === player.teamId && item.division === division);
+      const teamId = team ? team.id : null;
       return {
         id,
+        division,
+        playerNumber: normalizePlayerNumber(
+          player.playerNumber ?? player.playerId ?? player.photoId,
+          index,
+        ),
         name: String(player.name).trim(),
         role: String(player.role || DEFAULT_ROLES[index % DEFAULT_ROLES.length]).trim(),
         age: positiveInt(player.age, 22),
-        basePrice: Math.max(0, Number.parseInt(player.basePrice, 10) || 0),
+        basePrice: nonNegativeInt(player.basePrice),
         photo: player.photo || "",
         status: status === "sold" && !teamId ? "available" : status,
         teamId: status === "sold" ? teamId : null,
-        soldPrice: status === "sold" ? Math.max(0, Number.parseInt(player.soldPrice, 10) || 0) : 0,
+        soldPrice: status === "sold" ? nonNegativeInt(player.soldPrice) : 0,
         isRetained: status === "sold" ? Boolean(player.isRetained) : false,
       };
     });
 
-  const current = state.players.find(
-    (player) => player.id === state.auction.currentPlayerId && player.status === "available",
-  );
-  if (!current) state.auction.currentPlayerId = nextAvailablePlayerId(state);
-  if (!state.teams.some((team) => team.id === state.auction.highestBidderId)) {
-    state.auction.highestBidderId = null;
-    state.auction.currentBid = 0;
+  const rawAuctions = state.auctions && typeof state.auctions === "object" ? state.auctions : {};
+  state.auctions = {};
+  for (const division of DIVISIONS.map((item) => item.id)) {
+    const rawAuction =
+      division === state.ui.division
+        ? { ...(rawAuctions[division] || {}), ...(state.auction || {}) }
+        : rawAuctions[division] || {};
+    state.auctions[division] = normalizeAuctionState(state, division, rawAuction);
   }
+  state.auction = state.auctions[state.ui.division];
 
   return state;
 }
 
+function createMissingDefaultTeams(teams) {
+  const missing = [];
+  if (!teams.some((team) => team.division === "women")) {
+    missing.push(makeTeam("Women A", teams.length, "women"), makeTeam("Women B", teams.length + 1, "women"));
+  }
+  return missing;
+}
+
+function normalizeAuctionState(state, division, auction = {}) {
+  const normalized = {
+    currentPlayerId: auction.currentPlayerId || null,
+    currentBid: nonNegativeInt(auction.currentBid),
+    highestBidderId: auction.highestBidderId || null,
+  };
+  const current = state.players.find(
+    (player) =>
+      player.id === normalized.currentPlayerId &&
+      player.division === division &&
+      isAuctionablePlayer(player),
+  );
+  if (!current) {
+    normalized.currentPlayerId = nextAvailablePlayerIdForDivision(state, division, null);
+  }
+  if (!state.teams.some((team) => team.id === normalized.highestBidderId && team.division === division)) {
+    normalized.highestBidderId = null;
+    normalized.currentBid = 0;
+  }
+  return normalized;
+}
+
 function positiveInt(value, fallback) {
-  const parsed = Number.parseInt(value, 10);
+  const parsed = parseWholeNumber(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function nonNegativeInt(value, fallback = 0) {
+  const parsed = parseWholeNumber(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function normalizePlayerNumber(value, index) {
+  const text = String(value ?? "").trim();
+  return text || String(index + 1);
+}
+
+function parseWholeNumber(value) {
+  const normalized = String(value ?? "").replaceAll(",", "").trim();
+  if (!normalized) return Number.NaN;
+  return Number.parseInt(normalized, 10);
 }
 
 export function snapshotState(state) {
@@ -241,22 +296,25 @@ export function snapshotState(state) {
 export function restoreSnapshot(snapshot, currentState) {
   const restored = normalizeState(snapshot);
   restored.undoStack = currentState.undoStack.slice(0, -1);
-  restored.ui = { ...currentState.ui, message: "Last action undone." };
+  restored.ui = { ...currentState.ui, message: "" };
   restored.events = currentState.events;
   return restored;
 }
 
 export function deriveStats(state) {
   const stats = {};
-  const { initialBudget, maxPlayers, minBid } = state.settings;
+  const { initialBudget, maxPlayers, maxRetained, minBid } = state.settings;
+  const paidSlotsTarget = Math.max(0, maxPlayers - Math.min(maxPlayers, maxRetained));
+  const division = activeDivision(state);
 
-  for (const team of state.teams) {
-    const teamPlayers = state.players.filter((player) => player.teamId === team.id);
+  for (const team of teamsForDivision(state, division)) {
+    const teamPlayers = playersForDivision(state, division).filter((player) => player.teamId === team.id);
     const spent = teamPlayers.reduce((sum, player) => sum + Number(player.soldPrice || 0), 0);
     const playerCount = teamPlayers.length;
     const retainedCount = teamPlayers.filter((player) => player.isRetained).length;
+    const paidPlayerCount = Math.max(0, playerCount - retainedCount);
     const budgetLeft = initialBudget - spent;
-    const slotsAfterBuy = Math.max(0, maxPlayers - playerCount - 1);
+    const slotsAfterBuy = Math.max(0, paidSlotsTarget - paidPlayerCount - 1);
     const maxAllowedBid =
       playerCount >= maxPlayers ? 0 : Math.max(0, budgetLeft - minBid * slotsAfterBuy);
 
@@ -266,6 +324,7 @@ export function deriveStats(state) {
       budgetLeft,
       playerCount,
       retainedCount,
+      paidPlayerCount,
       maxAllowedBid,
     };
   }
@@ -275,6 +334,18 @@ export function deriveStats(state) {
 
 export function getCurrentPlayer(state) {
   return state.players.find((player) => player.id === state.auction.currentPlayerId) ?? null;
+}
+
+export function teamsForDivision(state, division = activeDivision(state)) {
+  return state.teams.filter((team) => team.division === division);
+}
+
+export function playersForDivision(state, division = activeDivision(state)) {
+  return state.players.filter((player) => player.division === division);
+}
+
+export function isAuctionablePlayer(player) {
+  return Boolean(player) && player.status !== "sold";
 }
 
 export function openingBidFor(player, settings) {
@@ -291,13 +362,13 @@ export function nextBidFor(state) {
 
 export function canTeamBid(state, teamId, bidAmount = nextBidFor(state)) {
   const stats = deriveStats(state)[teamId];
-  const finalBid = Math.max(0, Number.parseInt(bidAmount, 10) || 0);
+  const finalBid = nonNegativeInt(bidAmount);
   const player = getCurrentPlayer(state);
   const openingBid = openingBidFor(player, state.settings);
   const errors = [];
 
   if (!player) errors.push("No available player selected");
-  if (player && player.status !== "available") errors.push("Player is not available");
+  if (player && !isAuctionablePlayer(player)) errors.push("Player is already sold");
   if (!stats) errors.push("Team not found");
   if (stats && stats.playerCount >= state.settings.maxPlayers) errors.push("Squad full");
   if (player && finalBid < openingBid) errors.push(`Bid must be at least ${openingBid}`);
@@ -307,10 +378,21 @@ export function canTeamBid(state, teamId, bidAmount = nextBidFor(state)) {
 }
 
 export function nextAvailablePlayerId(state, afterId = state.auction.currentPlayerId) {
-  const available = state.players.filter((player) => player.status === "available");
+  return nextAvailablePlayerIdForDivision(state, activeDivision(state), afterId);
+}
+
+function nextAvailablePlayerIdForDivision(state, division, afterId = state.auction?.currentPlayerId) {
+  const available = playersForDivision(state, division).filter(isAuctionablePlayer);
   if (available.length === 0) return null;
-  const currentIndex = available.findIndex((player) => player.id === afterId);
-  return available[currentIndex + 1]?.id ?? available[0].id;
+  const currentIndex = state.players.findIndex((player) => player.id === afterId);
+  if (currentIndex === -1) return available[0].id;
+
+  for (let offset = 1; offset <= state.players.length; offset += 1) {
+    const player = state.players[(currentIndex + offset) % state.players.length];
+    if (player.division === division && isAuctionablePlayer(player)) return player.id;
+  }
+
+  return null;
 }
 
 export function setFinalBidForTeam(state, teamId, bidAmount) {
@@ -328,10 +410,12 @@ export function sellCurrentPlayer(state) {
   if (!state.auction.highestBidderId || state.auction.currentBid <= 0) {
     throw new Error("Select a highest bidder before confirming sale");
   }
+  const result = canTeamBid(state, state.auction.highestBidderId, state.auction.currentBid);
+  if (!result.ok) throw new Error(result.errors[0]);
 
   player.status = "sold";
   player.teamId = state.auction.highestBidderId;
-  player.soldPrice = state.auction.currentBid;
+  player.soldPrice = result.finalBid;
   player.isRetained = false;
   state.auction.currentBid = 0;
   state.auction.highestBidderId = null;
@@ -377,18 +461,9 @@ export function retainCurrentPlayer(state, teamId) {
   return state;
 }
 
-export function restartUnsoldRound(state) {
-  for (const player of state.players) {
-    if (player.status === "unsold") player.status = "available";
-  }
-  state.auction.currentBid = 0;
-  state.auction.highestBidderId = null;
-  state.auction.currentPlayerId = nextAvailablePlayerId(state, null);
-  return state;
-}
-
 export function resetAuctionResults(state) {
-  for (const player of state.players) {
+  const division = activeDivision(state);
+  for (const player of playersForDivision(state, division)) {
     player.status = "available";
     player.teamId = null;
     player.soldPrice = 0;
@@ -396,7 +471,7 @@ export function resetAuctionResults(state) {
   }
   state.auction.currentBid = 0;
   state.auction.highestBidderId = null;
-  state.auction.currentPlayerId = state.players[0]?.id ?? null;
+  state.auction.currentPlayerId = playersForDivision(state, division)[0]?.id ?? null;
   state.events = [];
   return state;
 }
@@ -419,17 +494,21 @@ export function validateAuction(state) {
   const issues = [];
   const teamNames = new Set();
   const playerNames = new Set();
+  const division = activeDivision(state);
+  const teams = teamsForDivision(state, division);
+  const players = playersForDivision(state, division);
+  const label = divisionLabel(division);
 
-  if (state.teams.length === 0) issues.push("Add at least one team.");
-  if (state.players.length === 0) issues.push("Add at least one player.");
+  if (teams.length === 0) issues.push(`Add at least one ${label} team.`);
+  if (players.length === 0) issues.push(`Add at least one ${label} player.`);
 
-  for (const team of state.teams) {
+  for (const team of teams) {
     const key = team.name.toLowerCase();
     if (teamNames.has(key)) issues.push(`Duplicate team name: ${team.name}`);
     teamNames.add(key);
   }
 
-  for (const player of state.players) {
+  for (const player of players) {
     const key = player.name.toLowerCase();
     if (playerNames.has(key)) issues.push(`Duplicate player name: ${player.name}`);
     playerNames.add(key);

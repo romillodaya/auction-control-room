@@ -1,4 +1,14 @@
-import { COLORS, DEFAULT_ROLES, makePlayer, makeTeam } from "./domain.mjs";
+import {
+  COLORS,
+  DEFAULT_ROLES,
+  activeDivision,
+  divisionLabel,
+  makePlayer,
+  makeTeam,
+  normalizeDivision,
+  playersForDivision,
+  teamsForDivision,
+} from "./domain.mjs";
 import { downloadText } from "./storage.mjs";
 
 export function parseCSV(text) {
@@ -55,12 +65,20 @@ function headerIndex(headers, aliases) {
     .find((index) => Number.isInteger(index) && index >= 0);
 }
 
-export function playersFromCSV(text, teams) {
+function filenameDivision(division) {
+  return division === "women" ? "women" : "men";
+}
+
+export function playersFromCSV(text, teams, fallbackDivision = "men") {
   const rows = parseCSV(text);
   if (rows.length < 2) return [];
   const headers = rows[0];
-  const teamByName = new Map(teams.map((team) => [team.name.toLowerCase(), team.id]));
+  const teamByName = new Map(
+    teams.map((team) => [`${team.division}:${team.name.toLowerCase()}`, team.id]),
+  );
 
+  const playerNumberIndex = headerIndex(headers, ["player id", "player number", "photo id", "id"]);
+  const divisionIndex = headerIndex(headers, ["gender", "division", "auction", "section"]);
   const nameIndex = headerIndex(headers, ["name", "player name"]);
   const roleIndex = headerIndex(headers, ["role", "category"]);
   const ageIndex = headerIndex(headers, ["age"]);
@@ -69,20 +87,26 @@ export function playersFromCSV(text, teams) {
   const teamIndex = headerIndex(headers, ["team", "team assigned", "assigned team"]);
   const soldPriceIndex = headerIndex(headers, ["sold price", "soldprice", "price"]);
   const retainedIndex = headerIndex(headers, ["is retained", "retained"]);
-  const photoIndex = headerIndex(headers, ["photo", "photo url"]);
+  const photoIndex = headerIndex(headers, ["photo", "photo url", "photo path", "photo url or path"]);
 
   return rows.slice(1).map((row, index) => {
+    const rawPlayerNumber = String(row[playerNumberIndex] || "").trim();
+    const division = normalizeDivision(row[divisionIndex], fallbackDivision);
     const name = row[nameIndex] || row[1] || row[0] || `Player ${index + 1}`;
     const teamName = String(row[teamIndex] || "").trim().toLowerCase();
-    const teamId = teamByName.get(teamName) || null;
-    const status = ["available", "sold", "unsold"].includes(String(row[statusIndex]).trim())
-      ? String(row[statusIndex]).trim()
+    const teamId = teamByName.get(`${division}:${teamName}`) || null;
+    const rawStatus = String(row[statusIndex] || "").trim().toLowerCase();
+    const status = ["available", "sold", "unsold"].includes(rawStatus)
+      ? rawStatus
       : teamId
         ? "sold"
         : "available";
+    const retained = String(row[retainedIndex] || "").trim().toLowerCase();
 
     return makePlayer(
       {
+        division,
+        playerNumber: rawPlayerNumber.startsWith("player_") ? "" : rawPlayerNumber,
         name,
         role: row[roleIndex] || DEFAULT_ROLES[index % DEFAULT_ROLES.length],
         age: row[ageIndex] || 22,
@@ -90,7 +114,7 @@ export function playersFromCSV(text, teams) {
         status,
         teamId: status === "sold" ? teamId : null,
         soldPrice: row[soldPriceIndex] || 0,
-        isRetained: String(row[retainedIndex] || "").toLowerCase() === "yes",
+        isRetained: ["yes", "true", "1", "retained"].includes(retained),
         photo: row[photoIndex] || "",
       },
       index,
@@ -98,26 +122,46 @@ export function playersFromCSV(text, teams) {
   });
 }
 
-export function teamsFromCSV(text) {
+export function teamsFromCSV(text, fallbackDivision = "men") {
   const rows = parseCSV(text);
   if (rows.length < 2) return [];
   const headers = rows[0];
+  const divisionIndex = headerIndex(headers, ["gender", "division", "auction", "section"]);
   const nameIndex = headerIndex(headers, ["team name", "name"]);
   const logoIndex = headerIndex(headers, ["logo", "logo url"]);
   const colorIndex = headerIndex(headers, ["color", "team color"]);
 
   return rows.slice(1).map((row, index) => ({
-    ...makeTeam(row[nameIndex] || row[1] || row[0] || `Team ${index + 1}`, index),
+    ...makeTeam(
+      row[nameIndex] || row[1] || row[0] || `Team ${index + 1}`,
+      index,
+      normalizeDivision(row[divisionIndex], fallbackDivision),
+    ),
     logo: row[logoIndex] || "",
     color: row[colorIndex] || COLORS[index % COLORS.length],
   }));
 }
 
-export function exportPlayersCSV(state) {
+export function exportPlayersCSV(state, division = activeDivision(state)) {
   const teamById = new Map(state.teams.map((team) => [team.id, team.name]));
+  const players = playersForDivision(state, division);
   const rows = [
-    ["Name", "Role", "Age", "Base Price", "Status", "Team Assigned", "Sold Price", "Is Retained", "Photo URL"],
-    ...state.players.map((player) => [
+    [
+      "Gender",
+      "Player ID",
+      "Name",
+      "Role",
+      "Age",
+      "Base Price",
+      "Status",
+      "Team Assigned",
+      "Sold Price",
+      "Is Retained",
+      "Photo URL or Path",
+    ],
+    ...players.map((player) => [
+      divisionLabel(player.division),
+      player.playerNumber,
       player.name,
       player.role,
       player.age,
@@ -129,13 +173,14 @@ export function exportPlayersCSV(state) {
       player.photo,
     ]),
   ];
-  downloadText("auction-players.csv", toCSV(rows), "text/csv");
+  downloadText(`auction-${filenameDivision(division)}-players.csv`, toCSV(rows), "text/csv");
 }
 
-export function exportTeamsCSV(state) {
+export function exportTeamsCSV(state, division = activeDivision(state)) {
+  const teams = teamsForDivision(state, division);
   const rows = [
-    ["Team Name", "Logo URL", "Color"],
-    ...state.teams.map((team) => [team.name, team.logo, team.color]),
+    ["Gender", "Team Name", "Logo URL", "Color"],
+    ...teams.map((team) => [divisionLabel(team.division), team.name, team.logo, team.color]),
   ];
-  downloadText("auction-teams.csv", toCSV(rows), "text/csv");
+  downloadText(`auction-${filenameDivision(division)}-teams.csv`, toCSV(rows), "text/csv");
 }
